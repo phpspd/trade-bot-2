@@ -57,7 +57,7 @@ const TICKERS = [
 
 const MAX_ORDER_TIME = 1 * 60 * 60 * 1000; //1h
 const FIX_LOSS_TIME = 2 * 7 * 24 * 60 * 60 * 1000; //2w
-const TOTAL_BALANCE = 0.00263;//17.55522361;
+const TOTAL_BALANCE = 0.01;//0.00263;//17.55522361;
 const RELATION_TO_TOTAL_BALANCE = 8;
 const SAFE_RELATION_TO_TOTAL_BALANCE = 0.1;
 const FIX_PROFIT = 1.024;
@@ -80,58 +80,70 @@ function createBuyOrder(orderId, issueTime, price, quantity, bought, sold) {
     };
 }
 
+function getPrecision(num) {
+    let result = 1;
+    for (let i = 0; i < num; ++i) {
+        result *= 10;
+    }
+
+    return result;
+}
+
 async function closeOrders(security, orderType) {
     let provider = security.provider;
-    let openOrderResponse = await provider.getOrders(orderType);
-    if (openOrderResponse && openOrderResponse.data) {
-        for (let order of openOrderResponse.data) {
-            if (/*order.type == 'MARKET_BUY' &&*/order.orderStatus == 'EXECUTED' || +(new Date(order.issueTime)) + MAX_ORDER_TIME < Date.now()) {
-                if (order.orderStatus == 'PARTIALLY_FILLED_AND_CANCELLED' || order.orderStatus == 'EXECUTED' || await provider.cancelLimit(order.id)) {
-                    if (order.type == "LIMIT_SELL") {
-                        security.buyOrders = security.buyOrders || [];
-                        let buyOrder = security.buyOrders.filter((item) => { return item.sellOrderId == order.id });
-                        if (buyOrder.length != 1) {
-                            console.warn('Can\'t find buyOrder or it\'s more than 1 with sellOrderId', order.id);
-                        } else {
-                            buyOrder = buyOrder[0];
-                            if (buyOrder.sold) {
-                                continue;
-                            }
-                            buyOrder.sellInProgress = false;
-                            if (order.remainingQuantity != order.quantity) {
-                                buyOrder.sold = true;
-                                buyOrder.quantity = (order.quantity * CRYPT2CRYPT_PRECISION - order.remainingQuantity * CRYPT2CRYPT_PRECISION) / CRYPT2CRYPT_PRECISION;
+    security.buyOrders = security.buyOrders || [];
+    let buyOrders = [].concat(security.buyOrders.filter((item) => { return !item.canceled && !item.bought }), security.buyOrders.filter((item) => { return !item.canceled && !item.sold && item.bought }));
+    for (let buyOrder of buyOrders) {
+        let order = await provider.getOrder(!buyOrder.bought ? buyOrder.orderId : buyOrder.sellOrderId);
+        if (!order) {
+            console.warn('Can\'t get info about buyOrder with orderId/sellOrderId', !buyOrder.bought ? buyOrder.orderId : buyOrder.sellOrderId);
+            continue;
+        }
+        if (order.orderStatus == 'EXECUTED' || +(new Date(order.issueTime)) + MAX_ORDER_TIME < Date.now()) {
+            if (order.orderStatus == 'PARTIALLY_FILLED_AND_CANCELLED' || order.orderStatus == 'EXECUTED' || await provider.cancelLimit(order.id)) {
+                if (order.type == "LIMIT_SELL") {
+                    buyOrder.sellInProgress = false;
+                    if (order.remainingQuantity != order.quantity) {
+                        buyOrder.sold = true;
+                        let precision = security.commonData.quantityScale ? getPrecision(security.commonData.quantityScale) : CRYPT2CRYPT_PRECISION;
+                        buyOrder.quantity = (order.quantity * precision - order.remainingQuantity * precision) / precision;
 
-                                if (order.remainingQuantity > 0) {
-                                    let partOrder = createBuyOrder(buyOrder.orderId, buyOrder.issueTime, buyOrder.price, order.remainingQuantity);
+                        if (order.remainingQuantity > 0) {
+                            let quantity = order.remainingQuantity;
+
+                            if (security.commonData.quantityStep) {
+                                quantity -= quantity % security.commonData.quantityStep;
+                            }
+                            if (security.commonData.minQuantity && security.commonData.minQuantity > quantity) {
+                                quantity = 0;
+                            }
+                            if (quantity && security.commonData.minVolume && buyOrder.price * quantity < security.commonData.minVolume) {
+                                console.log(security.ticker, buyOrder.price, '*', quantity, buyOrder.price * quantity, '< minimal volume', security.commonData.minVolume);
+                                quantity = 0;
+                            }
+
+                            if (quantity) {
+                                let partOrder = createBuyOrder(buyOrder.orderId, buyOrder.issueTime, buyOrder.price, order.remainingQuantity);
+                                if (partOrder && partOrder.orderId) {
                                     security.buyOrders.push(partOrder);
                                 }
-                            } else {
-                                delete buyOrder['sellPrice'];
                             }
                         }
-                    } else if (order.type == "LIMIT_BUY") {
-                        security.buyOrders = security.buyOrders || [];
-                        let buyOrder = security.buyOrders.filter((item) => { return item.orderId == order.id });
-                        if (buyOrder.bought) {
-                            continue;
-                        }
-                        if (buyOrder.length != 1) {
-                            console.warn('Can\'t find buyOrder or it\'s more than 1 with orderId', order.id);
-                        } else {
-                            buyOrder = buyOrder[0];
-                            if (order.remainingQuantity != order.quantity) {
-                                buyOrder.bought = true;
-                                buyOrder.quantity = Math.floor(order.quantity * CRYPT2CRYPT_PRECISION - order.remainingQuantity * CRYPT2CRYPT_PRECISION) / CRYPT2CRYPT_PRECISION;
-                                buyOrder.boughtTime = Date.now();
-                            } else {
-                                security.buyOrders = security.buyOrders.filter((item) => { return item.orderId != order.id });
-                            }
-                        }
+                    } else {
+                        delete buyOrder['sellPrice'];
                     }
-                } else {
-                    console.warn('Unable to cancelLimit, id', order.id);
+                } else if (order.type == "LIMIT_BUY") {
+                    if (order.remainingQuantity != order.quantity) {
+                        buyOrder.bought = true;
+                        let precision = security.commonData.quantityScale ? getPrecision(security.commonData.quantityScale) : CRYPT2CRYPT_PRECISION;
+                        buyOrder.quantity = (order.quantity * precision - order.remainingQuantity * precision) / precision;
+                        buyOrder.boughtTime = Date.now();
+                    } else {
+                        security.buyOrders = security.buyOrders.filter((item) => { return item.orderId != buyOrder.orderId });
+                    }
                 }
+            } else {
+                console.warn('Unable to cancelLimit, id', order.id);
             }
         }
     }
@@ -147,7 +159,7 @@ async function getRankedList(provider, minLastPrice, minVolume, relationTo) {
     if (typeof provider == 'string') {
         provider = proxy(provider)();
     }
-    let list = await provider.getCurrentData(true);
+    let list = await provider.getCurrentData(true, relationTo);
     if (!Array.isArray(list)) {
         return false;
     }
@@ -188,8 +200,8 @@ async function tickBot() {
         let rankedSecurities = [];
         let allSecurities = [];
 
-        let fullRankedList = await getRankedList('LiveCoin', false, false, 'BTC');
-        let rankedList = await getRankedList('LiveCoin', MIN_LAST_PRICE, MIN_VOLUME, 'BTC');
+        let fullRankedList = await getRankedList('Binance', false, false, 'BTC');
+        let rankedList = await getRankedList('Binance', MIN_LAST_PRICE, MIN_VOLUME, 'BTC');
         if (Array.isArray(rankedList)) {
             console.log('Ranked list', rankedList.map((item) => { return { ticker: item.ticker, rank: item.rank } }));
         } else {
@@ -197,7 +209,7 @@ async function tickBot() {
         }
 
         for (let item of rankedList) {
-            let security = new Security(item.ticker, { provider: 'LiveCoin' });
+            let security = new Security(item.ticker, { provider: 'Binance' });
             security.load();
 
             rankedSecurities.push(security);
@@ -212,7 +224,7 @@ async function tickBot() {
                 continue;
             }
 
-            let security = new Security(item.ticker, { provider: 'LiveCoin' });
+            let security = new Security(item.ticker, { provider: 'Binance' });
             security.load();
 
             if (security.buyOrders && security.buyOrders.filter((item) => { return !item.sold }).length) {
@@ -224,7 +236,7 @@ async function tickBot() {
             let provider = security.provider;
 
             let currencyName = security.getTicker().split('/')[0];
-            let currencyBalance = await provider.getBalance(currencyName);
+            //let currencyBalance = await provider.getBalance(currencyName);
 
             /*await closeOrders(security, 'OPEN');
             await closeOrders(security, 'PARTIALLY');
@@ -243,14 +255,17 @@ async function tickBot() {
             let rank = getRank(security.currentData);
             console.log('Rank', security.getTicker(), rank);
             let priceScale = security.commonData.priceScale;
-            let minLimitQuantity = security.commonData.minLimitQuantity;
+            let quantityScale = security.commonData.quantityScale;
+            let minQuantity = security.commonData.minQuantity;
+            let pricePrecision = priceScale ? getPrecision(priceScale) : CRYPT2CRYPT_PRECISION;
+            let quantityPrecision = quantityScale ? getPrecision(quantityScale) : CRYPT2CRYPT_PRECISION;
+            let quantityStep = security.commonData.quantityStep;
+            let priceStep = security.commonData.priceStep;
+            let minVolume = security.commonData.minVolume;
+
             if (!priceScale) {
                 console.warn(security.ticker, 'unable to load priceScale, skip this pair');
                 continue;
-            }
-            let precision = 1;
-            for (let i = 0; i < priceScale; ++i) {
-                precision *= 10;
             }
 
             security.buyOrders = security.buyOrders || [];
@@ -287,11 +302,25 @@ async function tickBot() {
                 let btcName = security.getTicker().split('/')[1];
                 let btcBalance = await provider.getBalance(btcName);
 
-                if (fullBalance * SAFE_RELATION_TO_TOTAL_BALANCE < btcBalance && currencyBalance == 0 && security.buyOrders.filter((item) => { return !item.sold }).length < MAX_OPENED_ORDERS ) {
+                if (fullBalance * SAFE_RELATION_TO_TOTAL_BALANCE < btcBalance && currencyBalance === 0 && security.buyOrders.filter((item) => { return !item.sold }).length < MAX_OPENED_ORDERS ) {
                     let availableBalance = Math.min(btcBalance - (fullBalance * SAFE_RELATION_TO_TOTAL_BALANCE), fullBalance / RELATION_TO_TOTAL_BALANCE);
-                    let bid = Math.floor((max_bid + (1 / precision)) * precision) / precision;
-                    let quantity = Math.floor((availableBalance / bid) * CRYPT2CRYPT_PRECISION) / CRYPT2CRYPT_PRECISION;
-                    if (quantity >= minLimitQuantity) {
+                    let bid = Math.floor((max_bid + (1 / pricePrecision)) * pricePrecision) / pricePrecision;
+
+                    if (priceStep) {
+                        bid = +(bid - (+(bid % priceStep).toFixed(priceScale)) + priceStep).toFixed(priceScale);
+                    }
+
+                    let quantity = Math.floor((availableBalance / bid) * quantityPrecision) / quantityPrecision;
+                    if (quantityStep) {
+                        quantity -= quantity % quantityStep;
+                        quantity = +quantity.toFixed(quantityScale);
+                    }
+                    let volume = +(bid * quantity).toFixed(priceScale);
+                    if (minVolume && volume < minVolume) {
+                        console.log(security.ticker, bid, '*', quantity, volume, '< minimal volume', minVolume);
+                        quantity = 0;
+                    }
+                    if (quantity >= minQuantity) {
 
                         let response = await provider.buyLimit(bid, quantity);
 

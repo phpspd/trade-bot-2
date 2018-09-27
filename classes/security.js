@@ -122,6 +122,9 @@ Security.prototype.save = function() {
 Security.prototype.load = function() {
     let dataPath = path.join(__dirname, 'data');
     let dataFile = path.join(dataPath, this.ticker.replace(/\//g, '_') + '.json');
+    if (!fs.existsSync(dataPath)) {
+        mkdirp.sync(dataPath);
+    }
     if (!fs.existsSync(dataFile)) {
         console.log(this.ticker, 'nothing to load');
         return ;

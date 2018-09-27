@@ -176,7 +176,7 @@ providers.LiveCoin = function(ticker) {
         result = {
             minVolume: response.minBtcVolume,
             priceScale: item.priceScale,
-            minLimitQuantity: item.minLimitQuantity
+            minQuantity: item.minQuantity
         }
 
 
@@ -361,5 +361,6 @@ providers.LiveCoin = function(ticker) {
 }
 
 providers.Bittrex = require('./proxy/bittrex-api');
+providers.Binance = require('./proxy/binance-api');
 
 module.exports = getProvider;

@@ -6,6 +6,21 @@ let request = require('../awaitable-request')
     , HmacSHA256 = CryptoJS.HmacSHA256
     ;
 
+
+const BASE = config.get('Binance').host;
+const API_KEY = config.get('Binance').apiKey || '';
+const SECRET_KEY = config.get('Binance').secretKey || '';
+
+const ORDER_STATUSES = {
+    NEW: 'OPEN',
+    PARTIALLY_FILLED: 'PARTIALLY',
+    FILLED: 'EXECUTED',
+    CANCELED: 'CANCELED',
+    PENDING_CANCEL: 'CANCELED',
+    REJECTED: 'CANCELED',
+    EXPIRED: 'CANCELED'
+}
+
 const REFRESH_LIMITS_TIME = 60 * 60 * 1000; //1 h
 let LAST_REFRESH_LIMITS_TIME = 0;
 
@@ -62,7 +77,7 @@ let sendRequest = async function(weight, orders, method, url, headers, noCheckLi
 }
 
 async function checkLimits(weight, orders) {
-    if (LAST_REFRESH_CURRENT_LIMITS_TIME) {
+    if (LAST_REFRESH_CURRENT_SECOND_LIMITS_TIME) {
         let seconds = Math.floor((Date.now() - LAST_REFRESH_CURRENT_SECOND_LIMITS_TIME) / 1000);
         if (seconds) {
             if (LIMIT_SECOND_ORDERS !== -1) {
@@ -76,6 +91,8 @@ async function checkLimits(weight, orders) {
 
             LAST_REFRESH_CURRENT_SECOND_LIMITS_TIME = Date.now();
         }
+    }
+    if (LAST_REFRESH_CURRENT_MINUTE_LIMITS_TIME) {
         let minutes = Math.floor((Date.now() - LAST_REFRESH_CURRENT_MINUTE_LIMITS_TIME) / 60 / 1000);
         if (minutes) {
             if (LIMIT_MINUTE_ORDERS !== -1) {
@@ -88,7 +105,9 @@ async function checkLimits(weight, orders) {
             }
             LAST_REFRESH_CURRENT_MINUTE_LIMITS_TIME = Date.now();
         }
-        let days = Math.floor((Date.now() - LAST_REFRESH_CURRENT_MINUTE_LIMITS_TIME) / 24 / 60 / 60 / 1000);
+    }
+    if (LAST_REFRESH_CURRENT_DAY_LIMITS_TIME) {
+        let days = Math.floor((Date.now() - LAST_REFRESH_CURRENT_DAY_LIMITS_TIME) / 24 / 60 / 60 / 1000);
         if (days) {
             if (LIMIT_DAY_ORDERS !== -1) {
                 CURRENT_DAY_ORDERS -= (days * LIMIT_DAY_ORDERS);
@@ -131,7 +150,7 @@ async function checkLimits(weight, orders) {
         LAST_REFRESH_LIMITS_TIME = response.serverTime;
         LIMIT_SECOND_WEIGHT = LIMIT_MINUTE_WEIGHT = LIMIT_DAY_WEIGHT = LIMIT_SECOND_ORDERS = LIMIT_MINUTE_ORDERS = LIMIT_DAY_ORDERS = 0;
         for (let limit of response.rateLimits) {
-            if (limit.rateLimitType == 'REQUESTS_WEIGHT') {
+            if (limit.rateLimitType == 'REQUEST_WEIGHT') {
                 if (limit.interval == 'SECOND') {
                     LIMIT_SECOND_WEIGHT = limit.limit;
                 }
@@ -213,30 +232,65 @@ async function checkLimits(weight, orders) {
 }
 
 async function exchangeInfo() {
-    let url = BASE + 'exchangeInfo';
+    let url = BASE + '/v1/exchangeInfo';
     let response = await sendRequest(1, false, 'GET', url, null, 1);
 
     SYMBOLS = response.symbols.map((item) => {
-        return {
+        let result = {
             ticker: [item.baseAsset, item.quoteAsset].join('/'),
             symbol: item.symbol,
-            priceScale: item.quoteAssetPrecision,
-            quantityScale: item.baseAsset.priceAssetPrecision
+            priceScale: +item.quotePrecision,
+            quantityScale: +item.baseAssetPrecision
+        };
+
+        if (Array.isArray(item.filters)) {
+            let priceFilter = item.filters.filter((filter) => { return filter.filterType == 'PRICE_FILTER' });
+            if (priceFilter.length) {
+                priceFilter = priceFilter[0];
+                if (priceFilter.minPrice) {
+                    result.minPrice = +priceFilter.minPrice;
+                }
+                if (priceFilter.maxPrice) {
+                    result.maxPrice = +priceFilter.maxPrice;
+                }
+                if (priceFilter.tickSize) {
+                    result.priceStep = +priceFilter.tickSize;
+                }
+            }
+            let lotSize = item.filters.filter((filter) => { return filter.filterType == 'LOT_SIZE' });
+            if (lotSize.length) {
+                lotSize = lotSize[0];
+                if (lotSize.minQty) {
+                    result.minQuantity = +lotSize.minQty;
+                }
+                if (lotSize.maxQty) {
+                    result.maxQuantity = +lotSize.maxQty;
+                }
+                if (lotSize.stepSize) {
+                    result.quantityStep = +lotSize.stepSize;
+                }
+            }
+            let volumeSize = item.filters.filter((filter) => { return filter.filterType == 'MIN_NOTIONAL' });
+            if (volumeSize.length) {
+                volumeSize = volumeSize[0];
+                if (volumeSize.minNotional) {
+                    result.minVolume = +volumeSize.minNotional;
+                }
+            }
         }
+
+        return result;
     });
 
     return response;
 }
 
 function BinanceAPI (ticker) {
-    let apiTicker = ticker.replace('/', '-');
-
-    const BASE = config.get('Binance').host;
-    const API_KEY = config.get('Binance').apiKey || '';
-    const SECRET_KEY = config.get('Binance').secretKey || '';
+    ticker = ticker || '';
+    let apiTicker = ticker.replace('/', '');
 
     function signParams(params, secretKey) {
-        return SHA256(queryString.stringify(params), secretKey).toString();
+        return HmacSHA256(queryString.stringify(params), secretKey).toString();
     }
 
     function getHeaders() {
@@ -249,33 +303,40 @@ function BinanceAPI (ticker) {
 
     methods.getCurrentData = async function(all) {
         all = all || false;
-        let symbols = all ? SYMBOLS : SYMBOLS.filter((item) => { return item.symbol == apiTicker });
+        if (!SYMBOLS.length) {
+            await exchangeInfo();
+        }
+        //let symbols = all ? SYMBOLS : SYMBOLS.filter((item) => { return item.symbol == apiTicker });
         let result = [];
 
-        for (let item of symbols) {
-            let response = await sendRequest(1, false, 'GET', BASE + '/ticker/24hr?symbol=' + item.symbol);
+        //for (let item of symbols) {
+            let response = await sendRequest(!all ? 1 : 40, false, 'GET', BASE + '/v1/ticker/24hr' + (!all ? '?symbol=' + apiTicker : ''));
             if (response.status) {
                 console.warn(response);
-                continue;
+                return false;
             }
 
             if (!Array.isArray(response)) {
                 response = [ response ];
             }
 
-            result = result.concat(response.map((item) => {
+            result = result.concat(response.map((resultItem) => {
+                let item = SYMBOLS.filter((item) => { return item.symbol == resultItem.symbol });
+                if (item.length) {
+                    item = item[0];
+                }
                 return {
-                    ticker: item.ticker,
-                    last: item.lastPrice,
-                    high: item.highPrice,
-                    low: item.lowPrice,
-                    volume: item.quoteVolume,
-                    max_bid: item.bidPrice,
-                    min_ask: item.askPrice
+                    ticker: item.ticker || '',
+                    last: +resultItem.lastPrice,
+                    high: +resultItem.highPrice,
+                    low: +resultItem.lowPrice,
+                    volume: +resultItem.quoteVolume,
+                    max_bid: +resultItem.bidPrice,
+                    min_ask: +resultItem.askPrice
                 }  
             }));
 
-        }
+        //}
 
         if (!all) {
             return result[0];
@@ -284,4 +345,217 @@ function BinanceAPI (ticker) {
     }
 
     
+    methods.getSecurityCommonData = async function() {
+        if (!SYMBOLS.length) {
+            await exchangeInfo();
+        }
+        let result = SYMBOLS.filter((item) => { return item.ticker == ticker });
+        if (!result.length) {
+            console.log('Ticker', ticker, 'not found');
+            return false;
+        }
+
+        /*result = {
+            minVolume: response.minBtcVolume,
+            priceScale: item.priceScale,
+            minLimitQuantity: item.minLimitQuantity
+        }*/
+
+        return result[0];
+    }
+
+    methods.getOrder = async function(orderId) {
+        let params = {
+            orderId: orderId,
+            timestamp: Date.now()
+        };
+        let signature = signParams(params, SECRET_KEY);
+        params.signature = signature;
+        let headers = getHeaders();
+        let response = await sendRequest(1, false, 'GET', BASE + '/v3/order?' + queryString.stringify(params), headers);
+
+        /*if (!response.success) {
+            console.warn(response);
+            return false;
+        }*/
+        let symbol = SYMBOLS.filter((item) => { return item.symbol == response.symbol });
+        if (!symbol) {
+            console.warn('order', orderId, 'not found');
+            return false;
+        }
+
+        let result = {
+            id: response.orderId,
+            currencyPair: symbol.ticker,
+            type: [response.type, response.side].join('_'),
+            orderStatus: ORDER_STATUSES[response.status],
+            issueTime: response.time,
+            price: response.price,
+            quantity: response.origQty,
+            remainingQuantity: +((+response.origQty - (+response.executedQty)) + "").toFixed(symbol.quantityScale),
+            lastModificationTime: response.updateTime,
+            isWorking: response.isWorking
+        }
+
+        return result;
+    }
+
+    let accountInfo = null;
+
+    methods.getBalance = async function(currency) {
+        if (!accountInfo) {
+            let params = {
+                timestamp: Date.now()
+            };
+            let signature = signParams(params, SECRET_KEY);
+            params.signature = signature;
+            let headers = getHeaders();
+            let response = await sendRequest(5, false, 'GET', BASE + '/v3/account?' + queryString.stringify(params), headers);
+
+            accountInfo = response;
+        }
+        
+        let balance = accountInfo.balances.filter((item) => { return item.asset == currency });
+        if (!balance.length) {
+            return 0;
+            //console.log('Balance', currency, 'not found');
+            //return false;
+        }
+
+        accountInfo = null; //TODO
+
+        /*if (!response.success) {
+            console.warn(response);
+            return false;
+        }*/
+
+        return balance.free;
+    }
+
+    methods.buyLimit = async function(price, quantity) {
+        let params = {
+            symbol: apiTicker,
+            side: 'BUY',
+            type: 'LIMIT',
+            timeInForce: 'GTC',
+            quantity: quantity,
+            price: price,
+            timestamp: Date.now()
+        };
+        let signature = signParams(params, SECRET_KEY);
+        params.signature = signature;
+        let headers = getHeaders();
+
+        let response = await sendRequest(1, true, 'POST', BASE + '/v3/order/test?' + queryString.stringify(params), headers);
+
+        if (!response.orderId) {
+            console.warn(response);
+            return false;
+        }
+
+        return {
+            orderId: response.orderId
+        };
+    }
+
+    methods.sellLimit = async function(price, quantity) {
+        let params = {
+            symbol: apiTicker,
+            side: 'SELL',
+            type: 'LIMIT',
+            quantity: quantity,
+            price: price,
+            timestamp: Date.now()
+        };
+        let signature = signParams(params, SECRET_KEY);
+        params.signature = signature;
+        let headers = getHeaders();
+
+        let response = await sendRequest(1, true, 'POST', BASE + '/v3/order?' + queryString.stringify(params), headers);
+
+        if (!response.orderId) {
+            console.warn(response);
+            return false;
+        }
+
+        return {
+            orderId: response.orderId
+        };
+    }
+
+    methods.buyMarket = async function(quantity) {
+        let params = {
+            symbol: apiTicker,
+            side: 'BUY',
+            type: 'MARKET',
+            quantity: quantity,
+            timestamp: Date.now()
+        };
+        let signature = signParams(params, SECRET_KEY);
+        params.signature = signature;
+        let headers = getHeaders();
+
+        let response = await sendRequest(1, true, 'POST', BASE + '/v3/order?' + queryString.stringify(params), headers);
+
+        if (!response.orderId) {
+            console.warn(response);
+            return false;
+        }
+
+        return {
+            orderId: response.orderId
+        };
+    }
+
+    methods.sellMarket = async function(quantity) {
+        let params = {
+            symbol: apiTicker,
+            side: 'SELL',
+            type: 'MARKET',
+            quantity: quantity,
+            price: price,
+            timestamp: Date.now()
+        };
+        let signature = signParams(params, SECRET_KEY);
+        params.signature = signature;
+        let headers = getHeaders();
+
+        let response = await sendRequest(1, true, 'POST', BASE + '/v3/order?' + queryString.stringify(params), headers);
+
+        if (!response.orderId) {
+            console.warn(response);
+            return false;
+        }
+
+        return {
+            orderId: response.orderId
+        };
+    }
+
+    methods.cancelLimit = async function(orderId) {
+        let params = {
+            symbol: apiTicker,
+            orderId: orderId,
+            timestamp: Date.now()
+        };
+        let signature = signParams(params, SECRET_KEY);
+        params.signature = signature;
+        let headers = getHeaders();
+
+        let response = await sendRequest(1, true, 'DELETE', BASE + '/v3/order?' + queryString.stringify(params), headers);
+
+        if (!response.orderId) {
+            console.warn(response);
+            return false;
+        }
+
+        return {
+            success: true,
+            orderId: response.orderId
+        };
+    }
+
+    return methods;
 }
+
+module.exports = BinanceAPI;
