@@ -101,7 +101,7 @@ async function checkLimits(weight, orders) {
             }
             if (LIMIT_MINUTE_WEIGHT !== -1) {
                 CURRENT_MINUTE_WEIGHT -= (minutes * LIMIT_MINUTE_WEIGHT);
-                LIMIT_MINUTE_WEIGHT = LIMIT_MINUTE_WEIGHT < 0 ? 0 : LIMIT_MINUTE_WEIGHT;
+                CURRENT_MINUTE_WEIGHT = CURRENT_MINUTE_WEIGHT < 0 ? 0 : CURRENT_MINUTE_WEIGHT;
             }
             LAST_REFRESH_CURRENT_MINUTE_LIMITS_TIME = Date.now();
         }

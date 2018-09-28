@@ -62,8 +62,8 @@ const RELATION_TO_TOTAL_BALANCE = 8;
 const SAFE_RELATION_TO_TOTAL_BALANCE = 0.01;
 const FIX_PROFIT = 1.025;
 const CRYPT2CRYPT_PRECISION = 100000000; //8 symbols
-const MIN_LAST_PRICE = 0.0005;
-const MIN_VOLUME = 500;
+const MIN_LAST_PRICE = 0.0002;
+const MIN_VOLUME = 300;
 const MAX_PAIRS = 10;
 const MAX_OPENED_ORDERS = 1;
 
@@ -155,7 +155,7 @@ function getRank(ticker) {
     return rank;
 }
 
-async function getRankedList(provider, minLastPrice, minVolume, relationTo, relMaxMin24hPrice, relAskMin24hPrice) {
+async function getRankedList(provider, minLastPrice, minVolume, relationTo, relMaxMin24hPrice, relAskToAvg24hPrice) {
     if (typeof provider == 'string') {
         provider = proxy(provider)();
     }
@@ -180,8 +180,8 @@ async function getRankedList(provider, minLastPrice, minVolume, relationTo, relM
         list = list.filter((item) => { return item.high / item.low >= relMaxMin24hPrice })
     }
 
-    if (relAskMin24hPrice) {
-        list = list.filter((item) => { return item.min_ask / item.low >= relAskMin24hPrice })
+    if (relAskToAvg24hPrice) {
+        list = list.filter((item) => { return item.min_ask / ((item.high + item.low) / 2) <= relAskToAvg24hPrice })
     }
 
     if (typeof relationTo == 'string') {
@@ -209,7 +209,7 @@ async function tickBot() {
         let allSecurities = [];
 
         let fullRankedList = await getRankedList('Binance', false, false, 'BTC');
-        let rankedList = await getRankedList('Binance', MIN_LAST_PRICE, MIN_VOLUME, 'BTC', 1.06, 1.03);
+        let rankedList = await getRankedList('Binance', MIN_LAST_PRICE, MIN_VOLUME, 'BTC', 1.04);
         if (Array.isArray(rankedList)) {
             console.log('Ranked list', rankedList.map((item) => { return { ticker: item.ticker, rank: item.rank } }));
         } else {
@@ -376,7 +376,7 @@ let intervalId = null;
 module.exports.index = async function(req, res, next) {
     if (!intervalId) {
         tickBot();
-        intervalId = setInterval(tickBot, 5 * 60 * 1000);
+        intervalId = setInterval(tickBot, 2 * 60 * 1000);
         console.log('Interval set');
     } else {
         console.log('Interval already set');
