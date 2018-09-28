@@ -366,6 +366,7 @@ function BinanceAPI (ticker) {
 
     methods.getOrder = async function(orderId) {
         let params = {
+            symbol: apiTicker,
             orderId: orderId,
             timestamp: Date.now()
         };
@@ -379,10 +380,11 @@ function BinanceAPI (ticker) {
             return false;
         }*/
         let symbol = SYMBOLS.filter((item) => { return item.symbol == response.symbol });
-        if (!symbol) {
+        if (!symbol.length) {
             console.warn('order', orderId, 'not found');
             return false;
         }
+        symbol = symbol[0];
 
         let result = {
             id: response.orderId,
@@ -392,7 +394,7 @@ function BinanceAPI (ticker) {
             issueTime: response.time,
             price: response.price,
             quantity: response.origQty,
-            remainingQuantity: +((+response.origQty - (+response.executedQty)) + "").toFixed(symbol.quantityScale),
+            remainingQuantity: +(+response.origQty - (+response.executedQty)).toFixed(symbol.quantityScale),
             lastModificationTime: response.updateTime,
             isWorking: response.isWorking
         }
@@ -429,7 +431,7 @@ function BinanceAPI (ticker) {
             return false;
         }*/
 
-        return balance.free;
+        return +balance[0].free;
     }
 
     methods.buyLimit = async function(price, quantity) {
@@ -446,7 +448,7 @@ function BinanceAPI (ticker) {
         params.signature = signature;
         let headers = getHeaders();
 
-        let response = await sendRequest(1, true, 'POST', BASE + '/v3/order/test?' + queryString.stringify(params), headers);
+        let response = await sendRequest(1, true, 'POST', BASE + '/v3/order?' + queryString.stringify(params), headers);
 
         if (!response.orderId) {
             console.warn(response);
@@ -463,6 +465,7 @@ function BinanceAPI (ticker) {
             symbol: apiTicker,
             side: 'SELL',
             type: 'LIMIT',
+            timeInForce: 'GTC',
             quantity: quantity,
             price: price,
             timestamp: Date.now()

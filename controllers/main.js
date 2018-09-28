@@ -57,10 +57,10 @@ const TICKERS = [
 
 const MAX_ORDER_TIME = 1 * 60 * 60 * 1000; //1h
 const FIX_LOSS_TIME = 2 * 7 * 24 * 60 * 60 * 1000; //2w
-const TOTAL_BALANCE = 0.01;//0.00263;//17.55522361;
+const TOTAL_BALANCE = 0.01024;//0.00263;//17.55522361;
 const RELATION_TO_TOTAL_BALANCE = 8;
 const SAFE_RELATION_TO_TOTAL_BALANCE = 0.1;
-const FIX_PROFIT = 1.024;
+const FIX_PROFIT = 1.025;
 const CRYPT2CRYPT_PRECISION = 100000000; //8 symbols
 const MIN_LAST_PRICE = 0.00001;
 const MIN_VOLUME = 10;
@@ -92,7 +92,7 @@ function getPrecision(num) {
 async function closeOrders(security, orderType) {
     let provider = security.provider;
     security.buyOrders = security.buyOrders || [];
-    let buyOrders = [].concat(security.buyOrders.filter((item) => { return !item.canceled && !item.bought }), security.buyOrders.filter((item) => { return !item.canceled && !item.sold && item.bought }));
+    let buyOrders = [].concat(security.buyOrders.filter((item) => { return !item.canceled && !item.bought }), security.buyOrders.filter((item) => { return !item.canceled && !item.sold && item.bought && item.sellInProgress }));
     for (let buyOrder of buyOrders) {
         let order = await provider.getOrder(!buyOrder.bought ? buyOrder.orderId : buyOrder.sellOrderId);
         if (!order) {
@@ -103,10 +103,10 @@ async function closeOrders(security, orderType) {
             if (order.orderStatus == 'PARTIALLY_FILLED_AND_CANCELLED' || order.orderStatus == 'EXECUTED' || await provider.cancelLimit(order.id)) {
                 if (order.type == "LIMIT_SELL") {
                     buyOrder.sellInProgress = false;
-                    if (order.remainingQuantity != order.quantity) {
+                    if (order.remainingQuantity != order.sellQuantity) {
                         buyOrder.sold = true;
                         let precision = security.commonData.quantityScale ? getPrecision(security.commonData.quantityScale) : CRYPT2CRYPT_PRECISION;
-                        buyOrder.quantity = (order.quantity * precision - order.remainingQuantity * precision) / precision;
+                        buyOrder.sellQuantity = (order.sellQuantity * precision - order.remainingQuantity * precision) / precision;
 
                         if (order.remainingQuantity > 0) {
                             let quantity = order.remainingQuantity;
@@ -235,6 +235,8 @@ async function tickBot() {
         for (let security of allSecurities) {
             let provider = security.provider;
 
+            await security.init();
+
             let currencyName = security.getTicker().split('/')[0];
             //let currencyBalance = await provider.getBalance(currencyName);
 
@@ -246,8 +248,6 @@ async function tickBot() {
 
         for (let security of allSecurities) {
             let provider = security.provider;
-
-            await security.init();
 
             let min_ask = security.currentData.min_ask;
             let max_bid = security.currentData.max_bid;
@@ -274,18 +274,35 @@ async function tickBot() {
                     continue;
                 }
 
-                let ask = Math.floor((min_ask - (1 / precision)) * precision) / precision;
+                let ask = Math.floor((min_ask - (1 / pricePrecision)) * pricePrecision) / pricePrecision;
+
+                if (priceStep) {
+                    ask = +(ask - (+(ask % priceStep).toFixed(priceScale)) + priceStep).toFixed(priceScale);
+                }
+
+                let quantity = +order.quantity.toFixed(priceScale);
+                if (quantityStep) {
+                    quantity -= quantity % quantityStep;
+                    quantity = +quantity.toFixed(quantityScale);
+                }
+                let volume = +(ask * quantity).toFixed(priceScale);
+                if (minVolume && volume < minVolume) {
+                    console.log(security.ticker, ask, '*', quantity, volume, '< minimal volume', minVolume);
+                    quantity = 0;
+                }
                 
-                if (ask >= (order.price * FIX_PROFIT * precision) / precision || order.boughtTime + FIX_LOSS_TIME <= Date.now()) {
-                    let response = await provider.sellLimit(ask, +order.quantity.toFixed(priceScale));
+                if (quantity >= minQuantity && (ask >= (order.price * FIX_PROFIT * pricePrecision) / pricePrecision || order.boughtTime + FIX_LOSS_TIME <= Date.now())) {
+                    console.log(security.ticker, 'try to sellLimit', ask, quantity);
+                    let response = await provider.sellLimit(ask, quantity);
 
                     if (!response) {
-                        console.warn('Unable to sellLimit, price', ask, 'quantity', order.quantity, 'response', response, 'order', order);
+                        console.warn('Unable to sellLimit, price', ask, 'quantity', quantity, 'response', response, 'order', order);
                     } else {
-                        console.log(security.getTicker(), 'sellLimit, price', ask, 'quantity', order.quantity);
+                        console.log(security.getTicker(), 'sellLimit, price', ask, 'quantity', quantity);
                         if (order.boughtTime + FIX_LOSS_TIME <= Date.now()) {
                             console.log(security.getTicker(), 'fix loss');
                         }
+                        order.sellQuantity = quantity;
                         order.sellOrderId = response.orderId;
                         order.sellInProgress = true;
                         order.sellPrice = ask;
@@ -328,8 +345,9 @@ async function tickBot() {
                             console.warn('Unable to buyLimit, price', bid, 'quantity', quantity, 'response', response);
                         } else {
                             console.log('buyLimit, price', bid, 'quantity', quantity);
+                            let resultQuantity = +(quantity * 0.999).toFixed(quantityScale);
                             security.buyOrders = security.buyOrders || [];
-                            security.buyOrders.push(createBuyOrder(response.orderId, Date.now(), bid, quantity));
+                            security.buyOrders.push(createBuyOrder(response.orderId, Date.now(), bid, resultQuantity));
                         }
                         
                     }
