@@ -329,7 +329,7 @@ async function tickBot() {
                 let btcName = security.getTicker().split('/')[1];
                 let btcBalance = await provider.getBalance(btcName);
 
-                if (fullBalance * SAFE_RELATION_TO_TOTAL_BALANCE < btcBalance && currencyBalance === 0 && security.buyOrders.filter((item) => { return !item.sold }).length < MAX_OPENED_ORDERS ) {
+                if (fullBalance * SAFE_RELATION_TO_TOTAL_BALANCE < btcBalance/* && currencyBalance === 0*/ && security.buyOrders.filter((item) => { return !item.sold }).length < MAX_OPENED_ORDERS ) {
                     let availableBalance = Math.min(btcBalance - (fullBalance * SAFE_RELATION_TO_TOTAL_BALANCE), fullBalance / RELATION_TO_TOTAL_BALANCE);
                     let bid = Math.floor((max_bid + (1 / pricePrecision)) * pricePrecision) / pricePrecision;
 
