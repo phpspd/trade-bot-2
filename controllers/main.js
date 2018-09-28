@@ -59,11 +59,11 @@ const MAX_ORDER_TIME = 1 * 60 * 60 * 1000; //1h
 const FIX_LOSS_TIME = 2 * 7 * 24 * 60 * 60 * 1000; //2w
 const TOTAL_BALANCE = 0.01024;//0.00263;//17.55522361;
 const RELATION_TO_TOTAL_BALANCE = 8;
-const SAFE_RELATION_TO_TOTAL_BALANCE = 0.1;
+const SAFE_RELATION_TO_TOTAL_BALANCE = 0.01;
 const FIX_PROFIT = 1.025;
 const CRYPT2CRYPT_PRECISION = 100000000; //8 symbols
-const MIN_LAST_PRICE = 0.00001;
-const MIN_VOLUME = 10;
+const MIN_LAST_PRICE = 0.0005;
+const MIN_VOLUME = 500;
 const MAX_PAIRS = 10;
 const MAX_OPENED_ORDERS = 1;
 
@@ -155,7 +155,7 @@ function getRank(ticker) {
     return rank;
 }
 
-async function getRankedList(provider, minLastPrice, minVolume, relationTo) {
+async function getRankedList(provider, minLastPrice, minVolume, relationTo, relMaxMin24hPrice, relAskMin24hPrice) {
     if (typeof provider == 'string') {
         provider = proxy(provider)();
     }
@@ -174,6 +174,14 @@ async function getRankedList(provider, minLastPrice, minVolume, relationTo) {
 
     if (minVolume > 0) {
         list = list.filter((item) => { return item.volume >= minVolume });
+    }
+
+    if (relMaxMin24hPrice) {
+        list = list.filter((item) => { return item.high / item.low >= relMaxMin24hPrice })
+    }
+
+    if (relAskMin24hPrice) {
+        list = list.filter((item) => { return item.min_ask / item.low >= relAskMin24hPrice })
     }
 
     if (typeof relationTo == 'string') {
@@ -201,7 +209,7 @@ async function tickBot() {
         let allSecurities = [];
 
         let fullRankedList = await getRankedList('Binance', false, false, 'BTC');
-        let rankedList = await getRankedList('Binance', MIN_LAST_PRICE, MIN_VOLUME, 'BTC');
+        let rankedList = await getRankedList('Binance', MIN_LAST_PRICE, MIN_VOLUME, 'BTC', 1.06, 1.03);
         if (Array.isArray(rankedList)) {
             console.log('Ranked list', rankedList.map((item) => { return { ticker: item.ticker, rank: item.rank } }));
         } else {
@@ -290,6 +298,8 @@ async function tickBot() {
                     console.log(security.ticker, ask, '*', quantity, volume, '< minimal volume', minVolume);
                     quantity = 0;
                 }
+
+                console.log(security.ticker, 'current profit', +(ask / order.price).toFixed(4), 'expected', FIX_PROFIT);
                 
                 if (quantity >= minQuantity && (ask >= (order.price * FIX_PROFIT * pricePrecision) / pricePrecision || order.boughtTime + FIX_LOSS_TIME <= Date.now())) {
                     console.log(security.ticker, 'try to sellLimit', ask, quantity);
