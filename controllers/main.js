@@ -3,6 +3,9 @@
 let ctrlName = 'main'
     , views = require('../utils/views')(ctrlName)
     , proxy = require('../utils/proxy')
+    , fs = require('fs')
+    , datesHelper = require('../utils/dates-helper')
+    , path = require('path')
     ;
 
 let Security = require('../classes/security')
@@ -155,6 +158,84 @@ function getRank(ticker) {
     return rank;
 }
 
+function calcRoundTrade(result, list, startCurrency, startQuantity, finishCurrency, take_profit, fee, maxDepth, depth) {
+    finishCurrency = finishCurrency || startCurrency;
+    maxDepth = maxDepth || 3;
+    depth = depth || maxDepth;
+
+    result = result || [];
+
+    for (let ticker of list) {
+        let tickerParts = ticker.ticker.split('/');
+        let pos = tickerParts.indexOf(startCurrency);
+        if (pos === -1 || depth === 1 && tickerParts.indexOf(finishCurrency) === -1) {
+            continue;
+        }
+        let nextItem = null;
+        if (pos === 1) {
+            let price = ticker.min_ask;
+            if (!price) {
+                continue;
+            }
+            let quantity = +(((+(startQuantity / price).toFixed(8)) * (+(1 - fee).toFixed(8))).toFixed(8));
+            nextItem = {
+                ticker: ticker.ticker,
+                nextCurrency: tickerParts[0],
+                price: price,
+                quantity: quantity,
+                next: []
+            };
+        } else if (pos === 0) {
+            let price = ticker.max_bid;
+            if (!price) {
+                continue;
+            }
+            let quantity = +(((+(startQuantity * price).toFixed(8)) * (+(1 - fee).toFixed(8))).toFixed(8));
+            nextItem = {
+                ticker: ticker.ticker,
+                nextCurrency: tickerParts[1],
+                price: price,
+                quantity: quantity,
+                next: []
+            };
+        }
+        if (nextItem) {
+            if (depth > 1) {
+                nextItem.next = calcRoundTrade(nextItem.next, list, nextItem.nextCurrency, nextItem.quantity, finishCurrency, take_profit, fee, maxDepth, depth - 1);
+                if (!nextItem.next.length) {
+                    continue;
+                }
+            }
+            result.push(nextItem);
+        }
+    }
+
+    if (depth == maxDepth) {
+        function filterNext(arr, finishCurrency, take_profit, depth) {
+            return arr.filter((item) => {
+                if (depth > 1 && item.next.length) {
+                    item.next = filterNext(item.next, finishCurrency, take_profit, depth - 1);
+                    if (!item.next.length) {
+                        return false;
+                    }
+                } else {
+                    if (item.nextCurrency != finishCurrency || item.quantity < take_profit) {
+                        return false;
+                    }
+                }
+
+                return true;
+            });
+        }
+
+        result = filterNext(result, finishCurrency, take_profit, maxDepth);
+    }
+
+    return result;
+}
+
+let LIST = [];
+
 async function getRankedList(provider, minLastPrice, minVolume, relationTo, relMaxMin24hPrice, relAskToAvg24hPrice) {
     if (typeof provider == 'string') {
         provider = proxy(provider)();
@@ -163,6 +244,7 @@ async function getRankedList(provider, minLastPrice, minVolume, relationTo, relM
     if (!Array.isArray(list)) {
         return false;
     }
+    LIST = list;
 
     for (let ticker of list) {
         ticker.rank = getRank(ticker);
@@ -366,9 +448,37 @@ async function tickBot() {
 
             security.save();
         }
+        
+        let roundTrades3 = calcRoundTrade([], LIST, 'BTC', 1, 'BTC', 1.01, 0.001, 3);
+        saveRoundTrades(3, roundTrades3);
+        //console.log('Profitable roundTrades depth 3:', roundTrades3.length);
+        let roundTrades4 = calcRoundTrade([], LIST, 'BTC', 1, 'BTC', 1.01, 0.001, 4);
+        saveRoundTrades(4, roundTrades4);
+        //console.log('Profitable roundTrades depth 4:', roundTrades4.length);
 
     } catch (err) {
         console.log(err);
+    }
+}
+
+function saveRoundTrades(depth, data) {
+    console.log('Profitable roundTrades ', depth, ':', data.length);
+    if (data.length) {
+        data = {
+            time: datesHelper.getCurrentDateTime(),
+            data: data
+        };
+        try {
+            let filepath = path.join(__dirname, 'profitableTrades' + depth + '.json');
+            let storedData = [];
+            if (fs.existsSync(filepath)) {
+                storedData = JSON.parse(fs.readFileSync(filepath));
+            }
+            storedData.push(data);
+            fs.writeFileSync(filepath, JSON.stringify(storedData));
+        } catch (err) {
+            console.log('Unable to save roundTrades', err);
+        }
     }
 }
 
@@ -376,7 +486,7 @@ let intervalId = null;
 module.exports.index = async function(req, res, next) {
     if (!intervalId) {
         tickBot();
-        intervalId = setInterval(tickBot, 2 * 60 * 1000);
+        intervalId = setInterval(tickBot, 1 * 60 * 1000);
         console.log('Interval set');
     } else {
         console.log('Interval already set');
